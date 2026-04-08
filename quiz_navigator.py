@@ -199,7 +199,7 @@ def call_llm(prompt: str, images: list[str] = None, temperature: float = 0.7) ->
                 for img_base64 in images:
                     content.append({
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{img_base64}"}
+                        "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"}
                     })
 
             response = client.chat.completions.create(
@@ -221,7 +221,7 @@ def call_llm(prompt: str, images: list[str] = None, temperature: float = 0.7) ->
                 for img_base64 in images:
                     content.append({
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{img_base64}"}
+                        "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"}
                     })
 
             response = client.chat.completions.create(
@@ -238,6 +238,33 @@ def call_llm(prompt: str, images: list[str] = None, temperature: float = 0.7) ->
     return ""
 
 # ===================== VISION-BASED EXTRACTION =====================
+@st.cache_data(show_spinner=False)
+def _render_pdf_pages(filename: str, page_start: int, page_end: int) -> list[str]:
+    """
+    Render specific pages of the saved PDF as base64 JPEG strings.
+    JPEG at quality=85 is ~5-10x smaller than PNG with minimal quality loss,
+    which speeds up both browser display and LLM API uploads.
+    Cached so repeated navigation doesn't re-render the same pages.
+    """
+    import io as _io
+    pdf_path = Path("data") / filename / "original.pdf"
+    if not pdf_path.exists():
+        return []
+    try:
+        result = []
+        with pdfplumber.open(pdf_path) as pdf:
+            for page_num in range(page_start, min(page_end + 1, len(pdf.pages) + 1)):
+                page = pdf.pages[page_num - 1]
+                page_image = page.to_image(resolution=150)
+                img = page_image.original.convert("RGB")
+                buf = _io.BytesIO()
+                img.save(buf, format="JPEG", quality=85)
+                result.append(base64.b64encode(buf.getvalue()).decode())
+        return result
+    except Exception:
+        return []
+
+
 def _get_page_screenshots(filename: str) -> list[dict]:
     """
     Get full-page screenshots of a PDF for vision analysis.
@@ -794,24 +821,30 @@ elif st.session_state.page == "navigator":
                 st.divider()
 
                 page_start = selected_q.get("page_start", selected_q.get("page", 1))
-                page_end = selected_q.get("page_end", page_start)
+                # Derive page_end: use next question's page_start - 1 (questions are in order)
+                q_index = questions.index(selected_q)
+                if q_index + 1 < len(questions):
+                    next_q_page = questions[q_index + 1].get("page_start", page_start + 1)
+                    page_end = max(page_start, next_q_page - 1)
+                else:
+                    page_end = selected_q.get("page_end", page_start)
 
-                matched_images = [
-                    img for img in data["images"]
-                    if page_start <= img["page"] <= page_end
-                ]
+                page_images = _render_pdf_pages(
+                    st.session_state.current_pdf, page_start, page_end
+                )
 
-                if matched_images:
+                if page_images:
                     st.subheader("📸 Afbeeldingen")
 
                     parts = []
-                    for img in matched_images:
+                    for i, b64 in enumerate(page_images):
+                        page_num = page_start + i
                         parts.append(
-                            '<img src="data:image/png;base64,' + img["base64"] + '" '
-                            'onclick="openLightbox(this.src)" title="Pagina ' + str(img["page"]) + '" />'
+                            '<img src="data:image/jpeg;base64,' + b64 + '" '
+                            'onclick="openLightbox(this.src)" title="Pagina ' + str(page_num) + '" />'
                         )
                     thumbs_html = "".join(parts)
-                    num_rows = (len(matched_images) + 2) // 3
+                    num_rows = (len(page_images) + 2) // 3
                     thumb_height = num_rows * 180 + 20
 
                     lightbox_html = f"""
@@ -922,7 +955,7 @@ Vraag:
 
 Extra context van gebruiker:
 {extra_input_val or 'geen'}"""
-                        suggestion_images = [img["base64"] for img in matched_images] if matched_images else None
+                        suggestion_images = page_images if page_images else None
                         suggestion = call_llm(prompt, images=suggestion_images)
                         save_ai_suggestion(st.session_state.current_pdf, selected_q["chapter"], key, suggestion)
                         st.session_state[generating_key] = False
