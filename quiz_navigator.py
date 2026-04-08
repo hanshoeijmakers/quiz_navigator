@@ -472,7 +472,7 @@ if st.session_state.page == "home":
 • Navigator per hoofdstuk & vraag met AI-suggesties/antwoorden
 • Handmatig bewerken + opnieuw genereren met extra input
 • Werkt met grote quizzen (veel hoofdstukken/vragen)
-• Volledig lokaal (behalve AI)
+• API key vereist voor AI analyse en suggesties
 """)
     st.header("📤 Upload je Quiz PDF's")
     st.markdown("""
