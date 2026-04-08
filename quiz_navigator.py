@@ -65,8 +65,7 @@ if "config" not in st.session_state:
         "xai_key": os.getenv("XAI_API_KEY", ""),
         "xai_model": "grok-4-1-fast-reasoning",
         "openai_key": "",
-        "openai_model": "gpt-4o",
-        "ollama_model": "llama3.2"
+        "openai_model": "gpt-4o"
     }
 
 # ===================== SIDEBAR - CONFIG & NAVIGATION =====================
@@ -98,7 +97,7 @@ with st.sidebar:
             3. `pip install pytesseract`
             4. In Python: `pytesseract.pytesseract.pytesseract_cmd = r'C:\\Program Files\\Tesseract-OCR\\tesseract.exe'`
             """)
-    provider = st.selectbox("AI Provider", ["xAI Grok", "OpenAI", "Ollama (lokaal)", "Geen AI (alleen handmatig)"],
+    provider = st.selectbox("AI Provider", ["xAI Grok", "OpenAI", "Geen AI (alleen handmatig)"],
                             index=0 if st.session_state.config["provider"] == "xai" else 1 if st.session_state.config["provider"] == "openai" else 2)
 
     if provider == "xAI Grok":
@@ -113,10 +112,6 @@ with st.sidebar:
         st.session_state.config["provider"] = "openai"
         st.session_state.config["openai_key"] = st.text_input("OpenAI API Key", value=st.session_state.config["openai_key"], type="password")
         st.session_state.config["openai_model"] = st.selectbox("Model", ["gpt-4o", "o1"], index=0)
-    elif provider == "Ollama (lokaal)":
-        st.session_state.config["provider"] = "ollama"
-        st.session_state.config["ollama_model"] = st.text_input("Ollama model", value=st.session_state.config["ollama_model"])
-        st.caption("Ollama moet draaien op http://localhost:11434")
     else:
         st.session_state.config["provider"] = "none"
 
@@ -233,15 +228,6 @@ def call_llm(prompt: str, images: list[str] = None, temperature: float = 0.7) ->
                 max_tokens=4000
             )
             return response.choices[0].message.content.strip()
-
-        elif provider == "ollama":
-            # Ollama doesn't support vision in our setup, ignore images
-            import ollama
-            response = ollama.chat(
-                model=st.session_state.config["ollama_model"],
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return response["message"]["content"].strip()
 
     except Exception as e:
         st.error(f"LLM fout: {e}")
