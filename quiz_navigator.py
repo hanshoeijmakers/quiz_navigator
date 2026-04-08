@@ -420,6 +420,11 @@ def analyze_pdf(filename: str):
         for q in merged_questions_for_llm
     ])
 
+    with st.expander(f"📋 BEVESTIGDE VRAGEN ({len(merged_questions_for_llm)} totaal — dit gaat naar de finale LLM)", expanded=True):
+        for q in merged_questions_for_llm:
+            source = "👁 vision" if q.get("vision_found") else ("👁+OCR" if q.get("vision_enhanced") else "OCR")
+            st.write(f"- **Vraag {q['num']}** [{source}]: {q.get('text', '')[:120]}")
+
     # Step 3: Send preprocessed text to LLM for final structuring
     prompt = f"""Je bent een perfecte quiz-assistent. Analyseer de volgende Nederlandse quiz-PDF tekst en geef ALLEEN een valide JSON terug (geen extra tekst).
 
@@ -428,10 +433,12 @@ De tekst is voorverwerkt met gedetecteerde structuur markers:
 - [CONTAINS_TASK_INFO] = regel bevat actie/doe-opdracht
 - [EXTRACTION_SUMMARY] = samenvatting van gedetecteerde structuur
 
-VISION-ENHANCED QUESTIONS (from image analysis):
+BEVESTIGDE VRAGEN (visueel geverifieerd door directe analyse van de PDF-pagina's):
 {merged_questions_summary}
 
-Tekst:
+KRITISCH: De bovenstaande lijst is de autoritatieve bron voor welke vragen bestaan. Elke vraag in deze lijst MOET in de JSON output verschijnen, ook als de tekst hieronder de vraagtekst niet goed weergeeft (OCR-fouten). Gebruik de vraagtekst uit de lijst als de tekst hieronder niet leesbaar is.
+
+Tekst (mogelijk onvolledig door OCR-fouten in gescande pagina's):
 {preprocessed['full_text_for_llm']}
 
 JSON structuur (exact):
@@ -463,6 +470,7 @@ Voor doe-opdrachten:
 - Alles wat een fysieke actie vraagt (foto maken, knutselen, video maken, etc.)
 
 BELANGRIJK voor vragen:
+- Neem ALLE vragen uit de BEVESTIGDE VRAGEN lijst op — sla er geen over
 - De [EXTRACTION_SUMMARY] toont voor elke vraag een "page_start=N" waarde — gebruik die waarde exact als die beschikbaar is
 - Als je een vraag vindt die NIET in de EXTRACTION_SUMMARY staat, gebruik dan de dichtstbijzijnde [PAGINA N] marker vóór die vraag in de tekst als page_start
 - Verzin geen paginanummers; gebruik altijd de [PAGINA N] markers als bron
@@ -475,6 +483,26 @@ BELANGRIJK voor vragen:
             if "```json" in result:
                 result = result.split("```json")[1].split("```")[0].strip()
             structured = json.loads(result)
+            # Safety net: if the LLM still dropped a vision-confirmed question, inject it
+            # using the text Grok read from the page image (not OCR preprocessing)
+            llm_q_nums = {q["num"] for q in structured.get("questions", [])}
+            for vq in merged_questions_for_llm:
+                if vq["num"] not in llm_q_nums:
+                    # Use vision text if available (vision_found=True means text came from Grok image reading)
+                    vision_text = vq.get("text", "")
+                    structured.setdefault("questions", []).append({
+                        "chapter": vq.get("chapter", 1),
+                        "num": vq["num"],
+                        "title": f"Vraag {vq['num']}",
+                        "full_text": vision_text,
+                        "type": "doe",
+                        "page_start": vq.get("page", 0),
+                        "page_end": vq.get("page", 0),
+                        "vision_recovered": True,
+                    })
+                    st.warning(f"⚠️ Vraag {vq['num']} was dropped by LLM, recovered from Grok vision output")
+            structured["questions"].sort(key=lambda q: (q.get("chapter", 1), q["num"]))
+
             data["structured"] = structured
             timeline_count = len(structured.get('timeline', []))
             q_count = len(structured.get('questions', []))
