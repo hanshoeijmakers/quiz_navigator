@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pdfplumber
 from PIL import Image
 import io
@@ -104,7 +105,10 @@ with st.sidebar:
         st.session_state.config["provider"] = "xai"
         st.session_state.config["xai_model"] = st.selectbox("Model", ["grok-4-1-fast-reasoning", "grok-4.20-reasoning"],
                                                             index=0)
-        st.caption("ℹ️ API key loaded from .env file")
+        if os.getenv("XAI_API_KEY"):
+            st.caption("ℹ️ API key loaded from .env file")
+        else:
+            st.session_state.config["xai_key"] = st.text_input("xAI API Key", value=st.session_state.config["xai_key"], type="password")
     elif provider == "OpenAI":
         st.session_state.config["provider"] = "openai"
         st.session_state.config["openai_key"] = st.text_input("OpenAI API Key", value=st.session_state.config["openai_key"], type="password")
@@ -712,66 +716,65 @@ elif st.session_state.page == "navigator":
 
                 if matched_images:
                     st.subheader("📸 Afbeeldingen")
-                    thumbs_html = ""
+
+                    parts = []
                     for img in matched_images:
-                        page_num = img["page"]
-                        thumbs_html += (
-                            f'<img src="data:image/png;base64,{img["base64"]}" '
-                            f'onclick="qnOpenOverlay(this.src)" title="Pagina {page_num}" />'
+                        parts.append(
+                            '<img src="data:image/png;base64,' + img["base64"] + '" '
+                            'onclick="openLightbox(this.src)" title="Pagina ' + str(img["page"]) + '" />'
                         )
-                    overlay_html = f"""
+                    thumbs_html = "".join(parts)
+                    num_rows = (len(matched_images) + 2) // 3
+                    thumb_height = num_rows * 180 + 20
+
+                    lightbox_html = f"""
 <style>
-.qn-thumb-grid {{
+  body {{ margin: 0; background: transparent; }}
+  .thumb-grid {{
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 10px;
-    margin-bottom: 8px;
-}}
-.qn-thumb-grid img {{
+    gap: 8px;
+  }}
+  .thumb-grid img {{
     width: 100%;
     cursor: zoom-in;
     border-radius: 6px;
     border: 1px solid #ddd;
     transition: opacity 0.15s;
-}}
-.qn-thumb-grid img:hover {{ opacity: 0.8; }}
-#qn-overlay {{
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.88);
-    z-index: 99999;
-    cursor: zoom-out;
-    align-items: center;
-    justify-content: center;
-}}
-#qn-overlay.qn-open {{ display: flex; }}
-#qn-overlay img {{
-    max-width: 92vw;
-    max-height: 92vh;
-    object-fit: contain;
-    border-radius: 6px;
-    box-shadow: 0 4px 32px rgba(0,0,0,0.5);
-}}
+  }}
+  .thumb-grid img:hover {{ opacity: 0.75; }}
 </style>
-<div class="qn-thumb-grid">{thumbs_html}</div>
-<div id="qn-overlay" onclick="qnCloseOverlay()">
-  <img id="qn-overlay-img" src="" />
-</div>
+<div class="thumb-grid">{thumbs_html}</div>
 <script>
-function qnOpenOverlay(src) {{
-    document.getElementById('qn-overlay-img').src = src;
-    document.getElementById('qn-overlay').classList.add('qn-open');
+function openLightbox(src) {{
+  var doc = window.parent.document;
+  var existing = doc.getElementById('qn-lightbox');
+  if (existing) existing.remove();
+
+  var overlay = doc.createElement('div');
+  overlay.id = 'qn-lightbox';
+  overlay.style.cssText = [
+    'position:fixed', 'inset:0', 'background:rgba(0,0,0,0.88)',
+    'z-index:999999', 'display:flex', 'align-items:center',
+    'justify-content:center', 'cursor:zoom-out'
+  ].join(';');
+
+  var img = doc.createElement('img');
+  img.src = src;
+  img.style.cssText = 'max-width:92vw;max-height:92vh;object-fit:contain;border-radius:6px;box-shadow:0 4px 32px rgba(0,0,0,0.5)';
+
+  overlay.appendChild(img);
+  overlay.onclick = function() {{ overlay.remove(); }};
+  doc.body.appendChild(overlay);
+
+  function onKey(e) {{
+    if (e.key === 'Escape') {{ overlay.remove(); window.parent.removeEventListener('keydown', onKey); }}
+  }}
+  window.parent.addEventListener('keydown', onKey);
 }}
-function qnCloseOverlay() {{
-    document.getElementById('qn-overlay').classList.remove('qn-open');
-}}
-document.addEventListener('keydown', function(e) {{
-    if (e.key === 'Escape') qnCloseOverlay();
-}});
 </script>
 """
-                    st.markdown(overlay_html, unsafe_allow_html=True)
+                    components.html(lightbox_html, height=thumb_height)
 
                 st.divider()
 
@@ -788,31 +791,45 @@ document.addEventListener('keydown', function(e) {{
                         st.markdown(current_ai_suggestion)
                         if st.button("📋 Kopieer naar antwoord", key=f"copy_{key}"):
                             save_answer(st.session_state.current_pdf, selected_q["chapter"], key, current_ai_suggestion)
+                            st.session_state[f"answer_{key}"] = current_ai_suggestion
                             st.toast("✅ AI suggestie gekopieerd naar antwoord!")
 
                 # Custom answer input - use updated value after copy
                 current_answer = get_answer(st.session_state.current_pdf, selected_q["chapter"], key)
                 new_answer = st.text_area("Jouw Antwoord", value=current_answer, height=200, key=f"answer_{key}")
 
+                generating_key = f"generating_suggestion_{key}"
+                extra_input_key = f"extra_input_{key}"
+                if generating_key not in st.session_state:
+                    st.session_state[generating_key] = False
+
                 col1, col2, col3 = st.columns([2, 1, 1])
                 with col1:
-                    extra_input = st.text_input("Extra context voor AI (optioneel)", placeholder="Bijv. teamnummer, extra info")
+                    st.text_input("Extra context voor AI (optioneel)", placeholder="Bijv. teamnummer, extra info", key=extra_input_key)
                 with col2:
-                    if st.button("🤖 Genereer AI Suggestie", type="primary"):
+                    if st.button("🤖 Genereer AI Suggestie", type="primary", disabled=st.session_state[generating_key]):
+                        st.session_state[generating_key] = True
+                        st.rerun()
+                with col3:
+                    if st.button("💾 Opslaan"):
+                        save_answer(st.session_state.current_pdf, selected_q["chapter"], key, new_answer)
+                        st.toast("✅ Antwoord opgeslagen!")
+
+                if st.session_state[generating_key]:
+                    with st.spinner("🤖 AI suggestie genereren..."):
+                        extra_input_val = st.session_state.get(extra_input_key, "")
                         prompt = f"""Geef een volledig, correct en creatief antwoord/suggestie voor deze quizvraag (in natuurlijk Nederlands):
 
 Vraag:
 {selected_q['full_text']}
 
 Extra context van gebruiker:
-{extra_input or 'geen'}"""
-                        suggestion = call_llm(prompt)
+{extra_input_val or 'geen'}"""
+                        suggestion_images = [img["base64"] for img in matched_images] if matched_images else None
+                        suggestion = call_llm(prompt, images=suggestion_images)
                         save_ai_suggestion(st.session_state.current_pdf, selected_q["chapter"], key, suggestion)
-                        st.rerun()
-                with col3:
-                    if st.button("💾 Opslaan"):
-                        save_answer(st.session_state.current_pdf, selected_q["chapter"], key, new_answer)
-                        st.toast("✅ Antwoord opgeslagen!")
+                        st.session_state[generating_key] = False
+                    st.rerun()
 
 # ===================== FOOTER =====================
 st.caption("© 2026 Quiz Navigator • Hans Hoeijmakers")
