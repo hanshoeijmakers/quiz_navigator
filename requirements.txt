@@ -1,0 +1,15 @@
+# Core dependencies
+streamlit>=1.28.0
+pdfplumber>=0.10.0
+Pillow>=10.0.0
+openai>=1.3.0
+ollama>=0.1.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# OCR for scanned PDFs (requires system tesseract)
+# macOS: brew install tesseract
+# Ubuntu: sudo apt-get install tesseract-ocr
+# Windows: https://github.com/UB-Mannheim/tesseract/wiki
+pytesseract>=0.3.10
+pdf2image>=1.16.0
