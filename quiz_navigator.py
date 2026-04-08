@@ -416,7 +416,7 @@ def analyze_pdf(filename: str):
     # Use merged questions for LLM structuring
     merged_questions_for_llm = vision_result["merged_questions"] if vision_result["merged_questions"] else preprocessed["questions_detected"]
     merged_questions_summary = "\n".join([
-        f"  - Vraag {q['num']} (Chapter {q.get('chapter', 1)}): {q['text'][:100]}..."
+        f"  - Vraag {q['num']} (Chapter {q.get('chapter', 1)}, page_start={q.get('page', q.get('full_position', '?'))}): {q['text'][:400]}..."
         for q in merged_questions_for_llm
     ])
 
@@ -771,13 +771,13 @@ elif st.session_state.page == "navigator":
 
                 st.divider()
 
-                # Images for this question — match only on page_start.
-                # Using a page range causes overlap: e.g. page 2 appears in Q2, Q3 and Q4
-                # simultaneously, showing wrong images. page_start is the page where the
-                # question begins, which is the relevant scan for scanned PDFs.
                 page_start = selected_q.get("page_start", selected_q.get("page", 1))
+                page_end = selected_q.get("page_end", page_start)
 
-                matched_images = [img for img in data["images"] if img["page"] == page_start]
+                matched_images = [
+                    img for img in data["images"]
+                    if page_start <= img["page"] <= page_end
+                ]
 
                 if matched_images:
                     st.subheader("📸 Afbeeldingen")
