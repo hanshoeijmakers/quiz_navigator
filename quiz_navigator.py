@@ -270,6 +270,31 @@ def _render_pdf_pages(filename: str, page_start: int, page_end: int) -> list[str
         return []
 
 
+def _checkpoint_path(filename: str) -> Path:
+    return Path("data") / filename / "analysis_checkpoint.json"
+
+def _load_checkpoint(filename: str) -> dict:
+    path = _checkpoint_path(filename)
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def _save_checkpoint(filename: str, data: dict):
+    path = _checkpoint_path(filename)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+def _clear_checkpoint(filename: str):
+    path = _checkpoint_path(filename)
+    if path.exists():
+        path.unlink()
+
+
 @st.cache_data(show_spinner=False)
 def _get_page_screenshots(filename: str) -> list[dict]:
     """
@@ -319,24 +344,30 @@ def extract_questions_with_vision(filename: str, preprocessed: dict) -> dict:
     Returns:
         Dict with vision_questions and merged_questions
     """
-    page_screenshots = _get_page_screenshots(filename)
-    if not page_screenshots:
-        st.warning("⚠️ Vision analysis skipped: original PDF not found on disk. Re-upload the PDF to enable vision detection.")
-        return {"vision_questions": [], "merged_questions": []}
+    # Resume from checkpoint if vision scan was already completed
+    checkpoint = _load_checkpoint(filename)
+    if "vision_questions" in checkpoint:
+        st.info(f"♻️ Hervat vanuit checkpoint ({len(checkpoint['vision_questions'])} vragen gevonden in vorige scan)")
+        vision_questions = checkpoint["vision_questions"]
+    else:
+        page_screenshots = _get_page_screenshots(filename)
+        if not page_screenshots:
+            st.warning("⚠️ Vision analysis skipped: original PDF not found on disk. Re-upload the PDF to enable vision detection.")
+            return {"vision_questions": [], "merged_questions": []}
 
-    detected_q_summary = "\n".join([
-        f"  - Vraag {q['num']}: {q['text'][:80]}..."
-        for q in preprocessed.get("questions_detected", [])
-    ])
+        detected_q_summary = "\n".join([
+            f"  - Vraag {q['num']}: {q['text'][:80]}..."
+            for q in preprocessed.get("questions_detected", [])
+        ])
 
-    vision_questions = []
+        vision_questions = []
 
-    with st.spinner(f"📸 Grok analyseert pagina's van {filename}..."):
-        for screenshot in page_screenshots:
-            page_num = screenshot["page"]
-            img_base64 = screenshot["base64"]
+        with st.spinner(f"📸 Grok analyseert pagina's van {filename}..."):
+            for screenshot in page_screenshots:
+                page_num = screenshot["page"]
+                img_base64 = screenshot["base64"]
 
-            prompt = f"""Je bent een perfecte quiz-assistent. Analyseer deze PDF pagina-afbeelding en extracteer ALLE vragen.
+                prompt = f"""Je bent een perfecte quiz-assistent. Analyseer deze PDF pagina-afbeelding en extracteer ALLE vragen.
 
 CONTEXT - Vragen die al via OCR gevonden zijn (mogelijk incompleet):
 {detected_q_summary}
@@ -358,26 +389,29 @@ TAAK:
 BELANGRIJK: Retourneer ALLEEN valide JSON, geen extra tekst.
 """
 
-            try:
-                result = call_llm(prompt, images=[img_base64], temperature=0.1)
+                try:
+                    result = call_llm(prompt, images=[img_base64], temperature=0.1)
 
-                # Parse JSON
-                if "```json" in result:
-                    result = result.split("```json")[1].split("```")[0].strip()
-                elif "```" in result:
-                    result = result.split("```")[1].split("```")[0].strip()
-                vision_result = json.loads(result)
+                    # Parse JSON
+                    if "```json" in result:
+                        result = result.split("```json")[1].split("```")[0].strip()
+                    elif "```" in result:
+                        result = result.split("```")[1].split("```")[0].strip()
+                    vision_result = json.loads(result)
 
-                for q in vision_result.get("questions", []):
-                    if q.get("num") and q.get("full_text"):
-                        vision_questions.append({
-                            "num": q["num"],
-                            "page": page_num,
-                            "full_text": q.get("full_text", "")[:1000],
-                        })
-                        st.caption(f"  Pagina {page_num}: gevonden Vraag {q['num']}")
-            except Exception as e:
-                st.warning(f"⚠️ Vision analysis failed for page {page_num}: {str(e)[:100]}")
+                    for q in vision_result.get("questions", []):
+                        if q.get("num") and q.get("full_text"):
+                            vision_questions.append({
+                                "num": int(q["num"]),
+                                "page": page_num,
+                                "full_text": q.get("full_text", "")[:1000],
+                            })
+                            st.caption(f"  Pagina {page_num}: gevonden Vraag {q['num']}")
+                except Exception as e:
+                    st.warning(f"⚠️ Vision analysis failed for page {page_num}: {str(e)[:100]}")
+
+        # Persist vision results so a later failure doesn't require re-scanning
+        _save_checkpoint(filename, {"vision_questions": vision_questions})
 
     # Merge vision results with detected questions
     merged_questions = {}
@@ -516,50 +550,63 @@ BELANGRIJK voor vragen:
 - Verzin geen paginanummers; gebruik altijd de [PAGINA N] markers als bron
 """
 
-    with st.spinner(f"AI analyseert {filename}..."):
-        result = call_llm(prompt, temperature=0.3)
-        try:
-            # Probeer JSON te parsen (soms zit er markdown omheen)
-            if "```json" in result:
-                result = result.split("```json")[1].split("```")[0].strip()
-            structured = json.loads(result)
-            # Safety net: if the LLM still dropped a vision-confirmed question, inject it
-            # using the text Grok read from the page image (not OCR preprocessing)
-            llm_q_nums = {q["num"] for q in structured.get("questions", [])}
-            debug_log["llm_returned"] = sorted(llm_q_nums)
-            for vq in merged_questions_for_llm:
-                if vq["num"] not in llm_q_nums:
-                    vision_text = vq.get("text", "")
-                    structured.setdefault("questions", []).append({
-                        "chapter": vq.get("chapter", 1),
-                        "num": vq["num"],
-                        "title": f"Vraag {vq['num']}",
-                        "full_text": vision_text,
-                        "type": "doe",
-                        "page_start": vq.get("page", 0),
-                        "page_end": vq.get("page", 0),
-                        "vision_recovered": True,
-                    })
-                    debug_log["safety_net_recovered"].append(vq["num"])
-            structured["questions"].sort(key=lambda q: (q.get("chapter", 1), q["num"]))
+    # Resume from checkpoint if final LLM output was already generated
+    checkpoint = _load_checkpoint(filename)
+    if "llm_raw" in checkpoint:
+        st.info("♻️ Hervat vanuit checkpoint: eerder LLM-resultaat hergebruikt")
+        result = checkpoint["llm_raw"]
+    else:
+        with st.spinner(f"AI analyseert {filename}..."):
+            result = call_llm(prompt, temperature=0.3)
+        # Save raw output before parsing so a crash here doesn't lose the result
+        _save_checkpoint(filename, {**checkpoint, "llm_raw": result})
 
-            data["structured"] = structured
-            data["debug_log"] = debug_log
-            timeline_count = len(structured.get('timeline', []))
-            q_count = len(structured.get('questions', []))
-            st.success(f"✅ {filename} geanalyseerd! ⏰ Tijdlijn: {timeline_count} | Vragen: {q_count}")
+    try:
+        # Probeer JSON te parsen (soms zit er markdown omheen)
+        if "```json" in result:
+            result = result.split("```json")[1].split("```")[0].strip()
+        structured = json.loads(result)
+        # Safety net: if the LLM still dropped a vision-confirmed question, inject it
+        # using the text Grok read from the page image (not OCR preprocessing)
+        llm_q_nums = {q["num"] for q in structured.get("questions", [])}
+        debug_log["llm_returned"] = sorted(llm_q_nums)
+        for vq in merged_questions_for_llm:
+            if vq["num"] not in llm_q_nums:
+                vision_text = vq.get("text", "")
+                structured.setdefault("questions", []).append({
+                    "chapter": vq.get("chapter", 1),
+                    "num": vq["num"],
+                    "title": f"Vraag {vq['num']}",
+                    "full_text": vision_text,
+                    "type": "doe",
+                    "page_start": vq.get("page", 0),
+                    "page_end": vq.get("page", 0),
+                    "vision_recovered": True,
+                })
+                debug_log["safety_net_recovered"].append(vq["num"])
+        structured["questions"].sort(key=lambda q: (q.get("chapter", 1), q["num"]))
 
-            # Save analysis results to disk (debug_log stored inside preprocessing_info)
-            full_preprocessing_info = {**data.get("preprocessing_info", {}), "debug_log": debug_log}
-            save_pdf_analysis(filename, data["raw_text"], data["images"], structured, full_preprocessing_info)
+        data["structured"] = structured
+        data["debug_log"] = debug_log
+        timeline_count = len(structured.get('timeline', []))
+        q_count = len(structured.get('questions', []))
+        st.success(f"✅ {filename} geanalyseerd! ⏰ Tijdlijn: {timeline_count} | Vragen: {q_count}")
 
-        except Exception as e:
-            st.error(f"JSON parse fout: {e}")
-            st.text_area("Raw LLM output (voor debug)", result, height=300)
+        # Save analysis results to disk (debug_log stored inside preprocessing_info)
+        full_preprocessing_info = {**data.get("preprocessing_info", {}), "debug_log": debug_log}
+        save_pdf_analysis(filename, data["raw_text"], data["images"], structured, full_preprocessing_info)
 
-            # Show what preprocessing detected
-            with st.expander("📊 Preprocessing info"):
-                st.json(data["preprocessing_info"])
+        # Analysis complete — remove checkpoint
+        _clear_checkpoint(filename)
+
+    except Exception as e:
+        st.error(f"JSON parse fout: {e}")
+        st.text_area("Raw LLM output (voor debug)", result, height=300)
+        st.info("💡 Klik opnieuw op 'Analyseer' om verder te gaan zonder de pagina's opnieuw te scannen.")
+
+        # Show what preprocessing detected
+        with st.expander("📊 Preprocessing info"):
+            st.json(data["preprocessing_info"])
 
 # ===================== PAGE ROUTING =====================
 if st.session_state.page == "home":
