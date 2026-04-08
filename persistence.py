@@ -89,10 +89,13 @@ def get_ai_suggestion(pdf_name: str, chapter: int, question_key: str) -> str:
 
 def delete_pdf_data(pdf_name: str):
     """Delete all data for a PDF."""
+    import shutil
     pdf_dir = DATA_DIR / pdf_name
     if pdf_dir.exists():
-        import shutil
         shutil.rmtree(pdf_dir)
+    metadata_file = DATA_DIR / f"{pdf_name}_metadata.json"
+    if metadata_file.exists():
+        metadata_file.unlink()
 
 def export_all_data(pdf_name: str) -> dict:
     """Export all data for a PDF as a single dict."""

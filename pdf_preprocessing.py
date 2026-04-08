@@ -37,9 +37,9 @@ class PDFPreprocessor:
         # Remove common OCR artifacts and encoding issues
         text = text.replace('\\u00e9', 'é').replace('\\u00e8', 'è')
 
-        # Replace page break markers - keep newline structure for question detection
-        # This is important: "Vraag 1" might appear right after a page break
-        text = re.sub(r'--- PAGINA \d+ ---', '\n', text)
+        # Convert page break markers to inline tags so the LLM can read page numbers.
+        # Keep a surrounding newline so question detection still works at page boundaries.
+        text = re.sub(r'--- PAGINA (\d+) ---', r'\n[PAGINA \1]\n', text)
 
         # Normalize whitespace (but preserve structure)
         text = re.sub(r' +', ' ', text)  # Multiple spaces to single
@@ -111,18 +111,25 @@ class PDFPreprocessor:
                     if not q_text or len(q_text.strip()) < 10:
                         q_text = "[Image-heavy page - text unclear]"
 
-                # Infer chapter from context
-                chapter = 1
+                # Infer chapter and page from context before this match
                 before_text = text[:match.start()]
+
+                chapter = 1
                 chapter_matches = re.findall(r'Hoofdstuk\s+(\d+)', before_text, re.IGNORECASE)
                 if chapter_matches:
                     chapter = int(chapter_matches[-1])
+
+                page = 1
+                page_matches = re.findall(r'\[PAGINA (\d+)\]', before_text)
+                if page_matches:
+                    page = int(page_matches[-1])
 
                 found_questions[q_num] = {
                     'num': q_num,
                     'chapter': chapter,
                     'text': q_text[:500],
-                    'full_position': match.start()
+                    'full_position': match.start(),
+                    'page': page,
                 }
 
         questions = list(found_questions.values())
@@ -212,7 +219,7 @@ class PDFPreprocessor:
         if questions:
             summary.append("\nQuestion Structure Detected:")
             for q in questions[:10]:  # First 10
-                summary.append(f"  - Vraag {q['num']} (Chapter {q['chapter']}): {q['text'][:100]}...")
+                summary.append(f"  - Vraag {q['num']} (Chapter {q['chapter']}, page_start={q.get('page', 1)}): {q['text'][:100]}...")
             if len(questions) > 10:
                 summary.append(f"  ... and {len(questions) - 10} more questions")
 

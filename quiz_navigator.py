@@ -156,7 +156,8 @@ with st.sidebar:
                         with st.expander(f"📚 Hoofdstuk {ch}", expanded=False):
                             for q in chapters[ch]:
                                 key = f"{q['chapter']}-{q['num']}"
-                                if st.button(f"Vraag {q['num']}: {q['title']}", key=f"nav_{key}", use_container_width=True):
+                                pdf_key = pdf_name.replace(" ", "_").replace(".", "_")
+                                if st.button(f"Vraag {q['num']}: {q['title']}", key=f"nav_{pdf_key}_{key}", use_container_width=True):
                                     st.session_state.page = "navigator"
                                     st.session_state.current_pdf = pdf_name
                                     st.session_state.nav_chapter = ch
@@ -439,9 +440,9 @@ Voor doe-opdrachten:
 - Alles wat een fysieke actie vraagt (foto maken, knutselen, video maken, etc.)
 
 BELANGRIJK voor vragen:
-- De [EXTRACTION_SUMMARY] toont hoeveel vragen gedetecteerd zijn
-- "page_start" en "page_end" zijn paginanummers waar de vraag zich bevindt (bijv 3-4)
-- Dit wordt gebruikt om afbeeldingen aan de juiste vragen te koppelen
+- De [EXTRACTION_SUMMARY] toont voor elke vraag een "page_start=N" waarde — gebruik die waarde exact als die beschikbaar is
+- Als je een vraag vindt die NIET in de EXTRACTION_SUMMARY staat, gebruik dan de dichtstbijzijnde [PAGINA N] marker vóór die vraag in de tekst als page_start
+- Verzin geen paginanummers; gebruik altijd de [PAGINA N] markers als bron
 """
 
     with st.spinner(f"AI analyseert {filename}..."):
@@ -701,32 +702,76 @@ elif st.session_state.page == "navigator":
 
                 st.divider()
 
-                # Images for this question (matched by page range)
+                # Images for this question — match only on page_start.
+                # Using a page range causes overlap: e.g. page 2 appears in Q2, Q3 and Q4
+                # simultaneously, showing wrong images. page_start is the page where the
+                # question begins, which is the relevant scan for scanned PDFs.
                 page_start = selected_q.get("page_start", selected_q.get("page", 1))
-                page_end = selected_q.get("page_end", selected_q.get("page", 1))
 
-                matched_images = [img for img in data["images"] if page_start <= img["page"] <= page_end]
+                matched_images = [img for img in data["images"] if img["page"] == page_start]
 
                 if matched_images:
                     st.subheader("📸 Afbeeldingen")
-                    cols = st.columns(3)
-                    for i, img in enumerate(matched_images):
-                        with cols[i % 3]:
-                            # Show thumbnail with zoom button
-                            st.image(f"data:image/png;base64,{img['base64']}", use_container_width=True, caption=f"Pagina {img['page']}")
-                            if st.button(f"🔍 Zoom Pagina {img['page']}", key=f"zoom_{key}_{i}"):
-                                st.session_state[f"zoom_image_{key}"] = i
-
-                    # Show zoomed image if one is selected
-                    zoom_idx = st.session_state.get(f"zoom_image_{key}")
-                    if zoom_idx is not None and zoom_idx < len(matched_images):
-                        st.divider()
-                        zoomed_img = matched_images[zoom_idx]
-                        st.subheader(f"📸 Vergroot: Pagina {zoomed_img['page']}")
-                        st.image(f"data:image/png;base64,{zoomed_img['base64']}", use_container_width=False, width=1000)
-                        if st.button("❌ Sluit zoom", key=f"close_zoom_{key}"):
-                            del st.session_state[f"zoom_image_{key}"]
-                            st.rerun()
+                    thumbs_html = ""
+                    for img in matched_images:
+                        page_num = img["page"]
+                        thumbs_html += (
+                            f'<img src="data:image/png;base64,{img["base64"]}" '
+                            f'onclick="qnOpenOverlay(this.src)" title="Pagina {page_num}" />'
+                        )
+                    overlay_html = f"""
+<style>
+.qn-thumb-grid {{
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 8px;
+}}
+.qn-thumb-grid img {{
+    width: 100%;
+    cursor: zoom-in;
+    border-radius: 6px;
+    border: 1px solid #ddd;
+    transition: opacity 0.15s;
+}}
+.qn-thumb-grid img:hover {{ opacity: 0.8; }}
+#qn-overlay {{
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.88);
+    z-index: 99999;
+    cursor: zoom-out;
+    align-items: center;
+    justify-content: center;
+}}
+#qn-overlay.qn-open {{ display: flex; }}
+#qn-overlay img {{
+    max-width: 92vw;
+    max-height: 92vh;
+    object-fit: contain;
+    border-radius: 6px;
+    box-shadow: 0 4px 32px rgba(0,0,0,0.5);
+}}
+</style>
+<div class="qn-thumb-grid">{thumbs_html}</div>
+<div id="qn-overlay" onclick="qnCloseOverlay()">
+  <img id="qn-overlay-img" src="" />
+</div>
+<script>
+function qnOpenOverlay(src) {{
+    document.getElementById('qn-overlay-img').src = src;
+    document.getElementById('qn-overlay').classList.add('qn-open');
+}}
+function qnCloseOverlay() {{
+    document.getElementById('qn-overlay').classList.remove('qn-open');
+}}
+document.addEventListener('keydown', function(e) {{
+    if (e.key === 'Escape') qnCloseOverlay();
+}});
+</script>
+"""
+                    st.markdown(overlay_html, unsafe_allow_html=True)
 
                 st.divider()
 
