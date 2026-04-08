@@ -806,6 +806,8 @@ elif st.session_state.page == "timeline":
                 </tr>"""
             components.html(f"""
                 <style>
+                  body {{ color: #31333f; }}
+                  @media (prefers-color-scheme: dark) {{ body {{ color: #fafafa; }} }}
                   table {{ border-collapse: collapse; width: 100%; font-family: sans-serif; font-size: 14px; }}
                   .time-col {{ width: 25%; font-weight: bold; vertical-align: top; padding: 4px 8px 4px 0; }}
                   .info-col {{ padding: 4px 0; }}
