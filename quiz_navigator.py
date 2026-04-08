@@ -27,16 +27,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-st.title("📄 Quiz Navigator")
-st.markdown("""
-**Houd het overzicht op 1 plaats**  
-• Overzicht van alle doe-opdrachten    
-• Chronologische tijdlijn van alle events
-• Navigator per hoofdstuk & vraag met AI-suggesties/antwoorden  
-• Handmatig bewerken + opnieuw genereren met extra input  
-• Werkt met grote quizzen (veel hoofdstukken/vragen)  
-• Volledig lokaal (behalve AI)
-""")
 
 # ===================== SESSION STATE =====================
 # All data is persisted to disk:
@@ -45,6 +35,21 @@ st.markdown("""
 # Session state only holds current session UI state, not user data
 if "pdf_data" not in st.session_state:
     st.session_state.pdf_data = {}          # {filename: {"raw_text": str, "images": list[dict], "structured": dict}}
+    # Load all previously analyzed PDFs from disk
+    from pathlib import Path
+    data_dir = Path("data")
+    if data_dir.exists():
+        for metadata_file in sorted(data_dir.glob("*_metadata.json")):
+            pdf_name = metadata_file.name.replace("_metadata.json", "")
+            analysis = load_pdf_analysis(pdf_name)
+            if analysis:
+                st.session_state.pdf_data[pdf_name] = {
+                    "raw_text": analysis.get("raw_text", ""),
+                    "images": analysis.get("images", []),  # Load images from metadata
+                    "structured": analysis.get("structured"),
+                    "preprocessing_info": analysis.get("preprocessing_info", {})
+                }
+
 if "current_pdf" not in st.session_state:
     st.session_state.current_pdf = None
 if "page" not in st.session_state:
@@ -124,78 +129,228 @@ with st.sidebar:
             st.session_state.page = "timeline"
             st.rerun()
 
-    # Chapter/Question navigator (only if PDF analyzed)
-    if st.session_state.current_pdf and st.session_state.pdf_data.get(st.session_state.current_pdf, {}).get("structured"):
+    # Chapter/Question navigator - show all analyzed PDFs with expandable chapters
+    analyzed_pdfs = {fname: data for fname, data in st.session_state.pdf_data.items() if data.get("structured")}
+
+    if analyzed_pdfs:
         st.divider()
         st.header("📖 Navigator")
 
-        data = st.session_state.pdf_data[st.session_state.current_pdf]
-        questions = data["structured"].get("questions", [])
+        # Show all PDFs with their chapters as expandable sections
+        for pdf_name in sorted(analyzed_pdfs.keys()):
+            data = analyzed_pdfs[pdf_name]
+            questions = data["structured"].get("questions", [])
 
-        if questions:
-            # Group by chapter
-            chapters = {}
-            for q in questions:
-                ch = q["chapter"]
-                if ch not in chapters:
-                    chapters[ch] = []
-                chapters[ch].append(q)
+            if questions:
+                # Group by chapter
+                chapters = {}
+                for q in questions:
+                    ch = q["chapter"]
+                    if ch not in chapters:
+                        chapters[ch] = []
+                    chapters[ch].append(q)
 
-            for ch in sorted(chapters.keys()):
-                with st.expander(f"📚 Hoofdstuk {ch}"):
-                    for q in chapters[ch]:
-                        key = f"{q['chapter']}-{q['num']}"
-                        if st.button(f"Vraag {q['num']}: {q['title']}", key=f"nav_{key}", use_container_width=True):
-                            st.session_state.page = "navigator"
-                            st.session_state.nav_chapter = ch
-                            st.session_state.nav_question = q['num']
-                            st.rerun()
+                # Show PDF name as collapsible section
+                with st.expander(f"📄 {pdf_name}", expanded=False):
+                    for ch in sorted(chapters.keys()):
+                        with st.expander(f"📚 Hoofdstuk {ch}", expanded=False):
+                            for q in chapters[ch]:
+                                key = f"{q['chapter']}-{q['num']}"
+                                if st.button(f"Vraag {q['num']}: {q['title']}", key=f"nav_{key}", use_container_width=True):
+                                    st.session_state.page = "navigator"
+                                    st.session_state.current_pdf = pdf_name
+                                    st.session_state.nav_chapter = ch
+                                    st.session_state.nav_question = q['num']
+                                    st.rerun()
 
 # ===================== LLM HELPER =====================
-def call_llm(prompt: str, temperature: float = 0.7) -> str:
+def call_llm(prompt: str, images: list[str] = None, temperature: float = 0.7) -> str:
+    """
+    Call LLM with optional image support.
+
+    Args:
+        prompt: Text prompt to send to LLM
+        images: Optional list of base64 image strings (for vision models)
+        temperature: Temperature for response generation
+
+    Returns:
+        LLM response text
+    """
     provider = st.session_state.config["provider"]
     if provider == "none":
         return "Geen AI ingeschakeld. Bewerk handmatig."
-    
+
     try:
         if provider == "xai":
-            # xAI is OpenAI-compatible
+            # xAI is OpenAI-compatible, supports vision
             from openai import OpenAI
             client = OpenAI(
                 api_key=st.session_state.config["xai_key"],
                 base_url="https://api.x.ai/v1"
             )
+
+            # Build message content with text and optional images
+            content = [{"type": "text", "text": prompt}]
+
+            if images:
+                for img_base64 in images:
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img_base64}"}
+                    })
+
             response = client.chat.completions.create(
                 model=st.session_state.config["xai_model"],
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": content}],
                 temperature=temperature,
                 max_tokens=4000
             )
             return response.choices[0].message.content.strip()
-            
+
         elif provider == "openai":
             from openai import OpenAI
             client = OpenAI(api_key=st.session_state.config["openai_key"])
+
+            # Build message content with text and optional images
+            content = [{"type": "text", "text": prompt}]
+
+            if images:
+                for img_base64 in images:
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img_base64}"}
+                    })
+
             response = client.chat.completions.create(
                 model=st.session_state.config["openai_model"],
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": content}],
                 temperature=temperature,
                 max_tokens=4000
             )
             return response.choices[0].message.content.strip()
-            
+
         elif provider == "ollama":
+            # Ollama doesn't support vision in our setup, ignore images
             import ollama
             response = ollama.chat(
                 model=st.session_state.config["ollama_model"],
                 messages=[{"role": "user", "content": prompt}]
             )
             return response["message"]["content"].strip()
-            
+
     except Exception as e:
         st.error(f"LLM fout: {e}")
         return f"LLM fout: {str(e)}"
     return ""
+
+# ===================== VISION-BASED EXTRACTION =====================
+def extract_questions_with_vision(filename: str, data: dict, preprocessed: dict) -> dict:
+    """
+    Use Grok's vision to extract questions from PDF page images.
+
+    This supplements OCR by reading the actual page images, improving accuracy
+    for questions that OCR missed (e.g., questions 2, 4, 8, 9).
+
+    Args:
+        filename: PDF filename
+        data: Session data with raw_text and images
+        preprocessed: Preprocessing results (questions_detected, extraction_summary)
+
+    Returns:
+        Dict with vision_questions and merged_questions
+    """
+    if not data.get("images") or len(data["images"]) == 0:
+        return {"vision_questions": [], "merged_questions": []}
+
+    detected_q_summary = "\n".join([
+        f"  - Vraag {q['num']}: {q['text'][:80]}..."
+        for q in preprocessed.get("questions_detected", [])
+    ])
+
+    vision_questions = []
+
+    with st.spinner(f"📸 Grok analyseert afbeeldingen van {filename}..."):
+        # Process images to find missing questions
+        for img_idx, img in enumerate(data["images"]):
+            page_num = img.get("page", img_idx + 1)
+
+            # Only send images if we expect missing questions on this page
+            # (reduce API usage by being selective)
+            img_base64 = img.get("base64")
+            if not img_base64:
+                continue
+
+            prompt = f"""Je bent een perfecte quiz-assistent. Analyseer deze PDF pagina-afbeelding en extracteer ALLE vragen.
+
+CONTEXT - Vragen die al bekend zijn:
+{detected_q_summary}
+
+TAAK:
+1. Kijk naar de afbeelding
+2. Identificeer ALLE vragen op deze pagina (volledig getal "Vraag 1", "Vraag 2", etc.)
+3. Voor ELKE vraag: geef nummer, volledige tekst
+4. Geef resultaat als JSON:
+
+{{
+  "questions": [
+    {{"num": 1, "full_text": "volledige vraagtekst", "found": true}},
+    {{"num": 2, "full_text": "...", "found": true}}
+  ]
+}}
+
+BELANGRIJK: Retourneer ALLEEN valide JSON, geen extra tekst.
+"""
+
+            try:
+                result = call_llm(prompt, images=[img_base64], temperature=0.3)
+
+                # Parse JSON
+                if "```json" in result:
+                    result = result.split("```json")[1].split("```")[0].strip()
+                vision_result = json.loads(result)
+
+                for q in vision_result.get("questions", []):
+                    if q.get("found"):
+                        vision_questions.append({
+                            "num": q["num"],
+                            "page": page_num,
+                            "full_text": q.get("full_text", "")[:1000],
+                        })
+            except Exception as e:
+                st.warning(f"⚠️ Vision analysis failed for page {page_num}: {str(e)[:100]}")
+
+    # Merge vision results with detected questions
+    merged_questions = {}
+
+    # First, add all detected questions
+    for q in preprocessed.get("questions_detected", []):
+        merged_questions[q["num"]] = q
+
+    # Then, enhance with vision results
+    for vq in vision_questions:
+        if vq["num"] in merged_questions:
+            # Update with fuller text from vision
+            merged_questions[vq["num"]]["text"] = vq["full_text"]
+            merged_questions[vq["num"]]["vision_enhanced"] = True
+        else:
+            # Add new question found only by vision
+            # Infer chapter from existing questions
+            chapter = 1
+            if preprocessed.get("questions_detected"):
+                chapter = preprocessed["questions_detected"][0].get("chapter", 1)
+
+            merged_questions[vq["num"]] = {
+                "num": vq["num"],
+                "chapter": chapter,
+                "text": vq["full_text"],
+                "vision_found": True
+            }
+
+    return {
+        "vision_questions": vision_questions,
+        "merged_questions": sorted(merged_questions.values(), key=lambda x: x["num"])
+    }
+
 
 # ===================== ANALYSEER PDF =====================
 def analyze_pdf(filename: str):
@@ -229,13 +384,28 @@ def analyze_pdf(filename: str):
         st.write("\n**Extraction summary (voor LLM):**")
         st.text(preprocessed["extraction_summary"][:1000])
 
-    # Step 2: Send preprocessed text to LLM
+    # Step 2: Use vision to enhance question extraction (fill gaps from OCR)
+    vision_result = extract_questions_with_vision(filename, data, preprocessed)
+    if vision_result["vision_questions"]:
+        st.info(f"📸 Vision enhancement: Found {len(vision_result['vision_questions'])} questions from images")
+
+    # Use merged questions for LLM structuring
+    merged_questions_for_llm = vision_result["merged_questions"] if vision_result["merged_questions"] else preprocessed["questions_detected"]
+    merged_questions_summary = "\n".join([
+        f"  - Vraag {q['num']} (Chapter {q.get('chapter', 1)}): {q['text'][:100]}..."
+        for q in merged_questions_for_llm
+    ])
+
+    # Step 3: Send preprocessed text to LLM for final structuring
     prompt = f"""Je bent een perfecte quiz-assistent. Analyseer de volgende Nederlandse quiz-PDF tekst en geef ALLEEN een valide JSON terug (geen extra tekst).
 
 De tekst is voorverwerkt met gedetecteerde structuur markers:
 - [CONTAINS_TIME_INFO] = regel bevat tijdinformatie
 - [CONTAINS_TASK_INFO] = regel bevat actie/doe-opdracht
 - [EXTRACTION_SUMMARY] = samenvatting van gedetecteerde structuur
+
+VISION-ENHANCED QUESTIONS (from image analysis):
+{merged_questions_summary}
 
 Tekst:
 {preprocessed['full_text_for_llm']}
@@ -303,6 +473,16 @@ BELANGRIJK voor vragen:
 # ===================== PAGE ROUTING =====================
 if st.session_state.page == "home":
     # HOME PAGE - PDF Upload and Management
+    st.title("📄 Quiz Navigator")
+    st.markdown("""
+**Houd het overzicht op 1 plaats**
+• Overzicht van alle doe-opdrachten
+• Chronologische tijdlijn van alle events
+• Navigator per hoofdstuk & vraag met AI-suggesties/antwoorden
+• Handmatig bewerken + opnieuw genereren met extra input
+• Werkt met grote quizzen (veel hoofdstukken/vragen)
+• Volledig lokaal (behalve AI)
+""")
     st.header("📤 Upload je Quiz PDF's")
     st.markdown("""
     Sleep je quiz-PDF's hier naartoe. Je kunt meerdere PDF's tegelijk uploaden.
@@ -423,6 +603,17 @@ if st.session_state.page == "home":
                         st.session_state.current_pdf = None
                     st.rerun()
 
+            # Show preprocessing info upfront if available
+            if "preprocessing_info" in data and data["preprocessing_info"]:
+                st.write("**📊 Preprocessing detecties:**")
+                col_a, col_b, col_c = st.columns(3)
+                with col_a:
+                    st.metric("Vragen gedetecteerd", data["preprocessing_info"].get("questions_detected", "—"))
+                with col_b:
+                    st.metric("Timeline secties", data["preprocessing_info"].get("timeline_sections", "—"))
+                with col_c:
+                    st.metric("Task secties", data["preprocessing_info"].get("task_sections", "—"))
+
             # Debug: Show extraction details
             with st.expander(f"🔍 Debug: {fname}"):
                 st.write(f"**Karakters geëxtraheerd:** {len(data['raw_text'])}")
@@ -431,17 +622,6 @@ if st.session_state.page == "home":
                 # Show raw extracted text
                 with st.expander("Raw text (first 2000 chars)", expanded=False):
                     st.text_area("Extracted text preview", value=data["raw_text"][:2000], height=300, disabled=True, key=f"raw_{fname}")
-
-                # Show preprocessing detection
-                if "preprocessing_info" in data:
-                    st.write("**Preprocessing detecties:**")
-                    col_a, col_b, col_c = st.columns(3)
-                    with col_a:
-                        st.metric("Vragen gedetecteerd", data["preprocessing_info"]["questions_detected"])
-                    with col_b:
-                        st.metric("Timeline secties", data["preprocessing_info"]["timeline_sections"])
-                    with col_c:
-                        st.metric("Task secties", data["preprocessing_info"]["task_sections"])
 
 elif st.session_state.page == "timeline":
     # TIMELINE PAGE - Merged timeline + doe-opdrachten
@@ -516,8 +696,7 @@ elif st.session_state.page == "navigator":
             else:
                 key = f"{selected_q['chapter']}-{selected_q['num']}"
 
-                # Question header
-                st.header(f"Hoofdstuk {selected_q['chapter']} — {selected_q['title']}")
+                # Display question text (no header for navigator page)
                 st.markdown(selected_q["full_text"])
 
                 st.divider()
@@ -533,7 +712,21 @@ elif st.session_state.page == "navigator":
                     cols = st.columns(3)
                     for i, img in enumerate(matched_images):
                         with cols[i % 3]:
+                            # Show thumbnail with zoom button
                             st.image(f"data:image/png;base64,{img['base64']}", use_container_width=True, caption=f"Pagina {img['page']}")
+                            if st.button(f"🔍 Zoom Pagina {img['page']}", key=f"zoom_{key}_{i}"):
+                                st.session_state[f"zoom_image_{key}"] = i
+
+                    # Show zoomed image if one is selected
+                    zoom_idx = st.session_state.get(f"zoom_image_{key}")
+                    if zoom_idx is not None and zoom_idx < len(matched_images):
+                        st.divider()
+                        zoomed_img = matched_images[zoom_idx]
+                        st.subheader(f"📸 Vergroot: Pagina {zoomed_img['page']}")
+                        st.image(f"data:image/png;base64,{zoomed_img['base64']}", use_container_width=False, width=1000)
+                        if st.button("❌ Sluit zoom", key=f"close_zoom_{key}"):
+                            del st.session_state[f"zoom_image_{key}"]
+                            st.rerun()
 
                 st.divider()
 
@@ -550,10 +743,10 @@ elif st.session_state.page == "navigator":
                         st.markdown(current_ai_suggestion)
                         if st.button("📋 Kopieer naar antwoord", key=f"copy_{key}"):
                             save_answer(st.session_state.current_pdf, selected_q["chapter"], key, current_ai_suggestion)
-                            st.success("✅ AI suggestie gekopieerd naar antwoord!")
-                            st.rerun()
+                            st.toast("✅ AI suggestie gekopieerd naar antwoord!")
 
-                # Custom answer input
+                # Custom answer input - use updated value after copy
+                current_answer = get_answer(st.session_state.current_pdf, selected_q["chapter"], key)
                 new_answer = st.text_area("Jouw Antwoord", value=current_answer, height=200, key=f"answer_{key}")
 
                 col1, col2, col3 = st.columns([2, 1, 1])
@@ -574,7 +767,7 @@ Extra context van gebruiker:
                 with col3:
                     if st.button("💾 Opslaan"):
                         save_answer(st.session_state.current_pdf, selected_q["chapter"], key, new_answer)
-                        st.success("✅ Antwoord opgeslagen!")
+                        st.toast("✅ Antwoord opgeslagen!")
 
 # ===================== FOOTER =====================
 st.caption("© 2026 Quiz Navigator • Hans Hoeijmakers")

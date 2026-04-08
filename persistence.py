@@ -112,7 +112,7 @@ def save_pdf_analysis(pdf_name: str, raw_text: str, images: list, structured: di
     metadata = {
         "pdf_name": pdf_name,
         "raw_text": raw_text,
-        "images_count": len(images),
+        "images": images,  # Save images as base64 for persistence
         "preprocessing_info": preprocessing_info,
         "structured": structured,
         "saved_at": str(datetime.now())

@@ -70,56 +70,60 @@ class PDFPreprocessor:
 
     def detect_questions(self, text: str) -> List[Dict]:
         """
-        Detect question blocks (flexible: Vraag N:, Vraag N., question text, etc.)
-        Returns list of dicts with chapter, num, and text.
-        Also handles image-heavy pages where question headers might have minimal surrounding text.
+        Detect question blocks with enhanced OCR robustness.
+        Tries multiple patterns to handle OCR errors and formatting variations.
         """
         questions = []
 
-        # More flexible question detection - handle multiple patterns:
-        # 1. "Vraag 5" with following text (multiline capture)
-        # 2. "Vraag 5" on its own line with minimal/no text
-        # 3. Various delimiters: ":", ".", "-", "—", or nothing
+        # Multiple patterns to handle OCR errors and variations:
+        patterns = [
+            r'(?:^|\n)(Vraag|V[r1]?aag|Q)\s+(\d+)\s*[\.:—-]?\s*([^\n]*?)(?:\n|$)',  # Standard + OCR variants
+            r'(?:^|\n)V\s*r\s*a\s*a\s*g\s+(\d+)',  # Spaced out letters (OCR error)
+            r'(?:^|\n)(VRAAG|vraag)\s+(\d+)',  # Case variations
+        ]
 
-        # First pass: Look for "Vraag X" with up to 500 chars of following text
-        question_pattern = r'(?:^|\n)(Vraag|Q)\s+(\d+)\s*[\.:—-]?\s*([^\n]*?)(?:\n|$)'
+        found_questions = {}
 
-        found_questions = {}  # Track by number to avoid duplicates
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, re.MULTILINE | re.IGNORECASE):
+                # Extract question number - handle different group positions
+                try:
+                    if len(match.groups()) >= 2:
+                        q_num = int(match.group(2))
+                        q_text = match.group(3).strip() if len(match.groups()) >= 3 else ""
+                    else:
+                        q_num = int(match.group(1))
+                        q_text = ""
+                except (ValueError, IndexError):
+                    continue
 
-        for match in re.finditer(question_pattern, text, re.MULTILINE):
-            q_num = int(match.group(2))
-            q_text = match.group(3).strip()
+                # Skip if already found
+                if q_num in found_questions:
+                    continue
 
-            # Skip if we've already found this question number
-            if q_num in found_questions:
-                continue
-
-            # For minimal/no text, extract more context from following lines
-            if not q_text or len(q_text.strip()) < 10:
-                # Get the position and look ahead
-                match_end = match.end()
-                following_text = text[match_end:match_end + 500]
-                following_lines = following_text.split('\n')[:3]  # Next 3 lines
-                q_text = '\n'.join(following_lines).strip()
-
-                # If still minimal, mark as image-heavy
+                # Extract surrounding context if minimal text
                 if not q_text or len(q_text.strip()) < 10:
-                    q_text = "[Image-heavy page - text unclear]"
+                    match_end = match.end()
+                    following_text = text[match_end:match_end + 500]
+                    following_lines = following_text.split('\n')[:3]
+                    q_text = '\n'.join(following_lines).strip()
 
-            # Try to infer chapter from context (default to 1)
-            chapter = 1
-            # Look backwards in text for chapter marker
-            before_text = text[:match.start()]
-            chapter_matches = re.findall(r'Hoofdstuk\s+(\d+)', before_text)
-            if chapter_matches:
-                chapter = int(chapter_matches[-1])
+                    if not q_text or len(q_text.strip()) < 10:
+                        q_text = "[Image-heavy page - text unclear]"
 
-            found_questions[q_num] = {
-                'num': q_num,
-                'chapter': chapter,
-                'text': q_text[:500],  # First 500 chars
-                'full_position': match.start()
-            }
+                # Infer chapter from context
+                chapter = 1
+                before_text = text[:match.start()]
+                chapter_matches = re.findall(r'Hoofdstuk\s+(\d+)', before_text, re.IGNORECASE)
+                if chapter_matches:
+                    chapter = int(chapter_matches[-1])
+
+                found_questions[q_num] = {
+                    'num': q_num,
+                    'chapter': chapter,
+                    'text': q_text[:500],
+                    'full_position': match.start()
+                }
 
         questions = list(found_questions.values())
         return sorted(questions, key=lambda x: (x['chapter'], x['num']))
