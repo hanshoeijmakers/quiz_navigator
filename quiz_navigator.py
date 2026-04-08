@@ -8,6 +8,7 @@ import os
 from datetime import datetime
 import base64
 import requests  # voor xAI fallback indien nodig
+from pathlib import Path
 from dotenv import load_dotenv
 from pdf_preprocessing import PDFPreprocessor
 import pdf_ocr
@@ -38,7 +39,6 @@ st.set_page_config(
 if "pdf_data" not in st.session_state:
     st.session_state.pdf_data = {}          # {filename: {"raw_text": str, "images": list[dict], "structured": dict}}
     # Load all previously analyzed PDFs from disk
-    from pathlib import Path
     data_dir = Path("data")
     if data_dir.exists():
         for metadata_file in sorted(data_dir.glob("*_metadata.json")):
@@ -242,7 +242,6 @@ def _get_page_screenshots(filename: str) -> list[dict]:
     Uses the saved original PDF file (stored during upload).
     Returns list of {page: N, base64: "..."} dicts.
     """
-    from pathlib import Path
     import io as _io
     pdf_path = Path("data") / filename / "original.pdf"
     if not pdf_path.exists():
