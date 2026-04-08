@@ -159,7 +159,13 @@ with st.sidebar:
                             for q in chapters[ch]:
                                 key = f"{q['chapter']}-{q['num']}"
                                 pdf_key = pdf_name.replace(" ", "_").replace(".", "_")
-                                if st.button(f"Vraag {q['num']}: {q['title']}", key=f"nav_{pdf_key}_{key}", use_container_width=True):
+                                is_selected = (
+                                    st.session_state.page == "navigator"
+                                    and st.session_state.current_pdf == pdf_name
+                                    and st.session_state.nav_chapter == ch
+                                    and st.session_state.nav_question == q['num']
+                                )
+                                if st.button(f"Vraag {q['num']}: {q['title']}", key=f"nav_{pdf_key}_{key}", use_container_width=True, type="primary" if is_selected else "secondary"):
                                     st.session_state.page = "navigator"
                                     st.session_state.current_pdf = pdf_name
                                     st.session_state.nav_chapter = ch
