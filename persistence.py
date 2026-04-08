@@ -104,6 +104,23 @@ def get_note(pdf_name: str, chapter: int, question_key: str) -> str:
     data = load_chapter_data(pdf_name, chapter)
     return data.get("questions", {}).get(question_key, {}).get("note", "")
 
+def save_completed(pdf_name: str, chapter: int, question_key: str, completed: bool):
+    """Save the completed status for a question."""
+    file_path = get_chapter_file(pdf_name, chapter)
+    data = load_chapter_data(pdf_name, chapter)
+
+    if question_key not in data["questions"]:
+        data["questions"][question_key] = {}
+
+    data["questions"][question_key]["completed"] = completed
+
+    _write_chapter_file(file_path, data)
+
+def get_completed(pdf_name: str, chapter: int, question_key: str) -> bool:
+    """Get the completed status for a question."""
+    data = load_chapter_data(pdf_name, chapter)
+    return data.get("questions", {}).get(question_key, {}).get("completed", False)
+
 def delete_pdf_data(pdf_name: str):
     """Delete all data for a PDF."""
     import shutil

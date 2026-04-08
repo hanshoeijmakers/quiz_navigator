@@ -14,6 +14,7 @@ import pdf_ocr
 from persistence import (
     load_all_chapters, save_answer, save_ai_suggestion,
     get_answer, get_ai_suggestion, save_note, get_note,
+    save_completed, get_completed,
     delete_pdf_data, export_all_data,
     load_chapter_data, save_pdf_analysis, load_pdf_analysis, has_pdf_analysis
 )
@@ -137,39 +138,43 @@ with st.sidebar:
         st.divider()
         st.header("📖 Navigator")
 
-        # Show all PDFs with their chapters as expandable sections
+        # Collect all questions from all PDFs, grouped by chapter
+        chapters_combined: dict = {}  # {ch: [(pdf_name, q), ...]}
         for pdf_name in sorted(analyzed_pdfs.keys()):
-            data = analyzed_pdfs[pdf_name]
-            questions = data["structured"].get("questions", [])
+            for q in analyzed_pdfs[pdf_name]["structured"].get("questions", []):
+                ch = q["chapter"]
+                chapters_combined.setdefault(ch, []).append((pdf_name, q))
 
-            if questions:
-                # Group by chapter
-                chapters = {}
-                for q in questions:
-                    ch = q["chapter"]
-                    if ch not in chapters:
-                        chapters[ch] = []
-                    chapters[ch].append(q)
-
-                # Show PDF name as collapsible section
-                with st.expander(f"📄 {pdf_name}", expanded=False):
-                    for ch in sorted(chapters.keys()):
-                        with st.expander(f"📚 Hoofdstuk {ch}", expanded=False):
-                            for q in chapters[ch]:
-                                key = f"{q['chapter']}-{q['num']}"
-                                pdf_key = pdf_name.replace(" ", "_").replace(".", "_")
-                                is_selected = (
-                                    st.session_state.page == "navigator"
-                                    and st.session_state.current_pdf == pdf_name
-                                    and st.session_state.nav_chapter == ch
-                                    and st.session_state.nav_question == q['num']
-                                )
-                                if st.button(f"Vraag {q['num']}: {q['title']}", key=f"nav_{pdf_key}_{key}", use_container_width=True, type="primary" if is_selected else "secondary"):
-                                    st.session_state.page = "navigator"
-                                    st.session_state.current_pdf = pdf_name
-                                    st.session_state.nav_chapter = ch
-                                    st.session_state.nav_question = q['num']
-                                    st.rerun()
+        for ch in sorted(chapters_combined.keys()):
+            ch_entries = chapters_combined[ch]
+            done = sum(
+                1 for pn, q in ch_entries
+                if get_completed(pn, ch, f"{q['chapter']}-{q['num']}")
+            )
+            total = len(ch_entries)
+            bar = "".join(
+                "■" if get_completed(pn, ch, f"{q['chapter']}-{q['num']}") else "□"
+                for pn, q in ch_entries
+            )
+            st.markdown(f"**📚 Hoofdstuk {ch}**")
+            with st.expander(f"{bar}  {done}/{total}", expanded=False):
+                for pdf_name, q in ch_entries:
+                    key = f"{q['chapter']}-{q['num']}"
+                    pdf_key = pdf_name.replace(" ", "_").replace(".", "_")
+                    is_selected = (
+                        st.session_state.page == "navigator"
+                        and st.session_state.current_pdf == pdf_name
+                        and st.session_state.nav_chapter == ch
+                        and st.session_state.nav_question == q['num']
+                    )
+                    is_done = get_completed(pdf_name, ch, key)
+                    btn_label = f"{'✅' if is_done else '○'} Vraag {q['num']}: {q['title']}"
+                    if st.button(btn_label, key=f"nav_{pdf_key}_{key}", use_container_width=True, type="primary" if is_selected else "secondary"):
+                        st.session_state.page = "navigator"
+                        st.session_state.current_pdf = pdf_name
+                        st.session_state.nav_chapter = ch
+                        st.session_state.nav_question = q['num']
+                        st.rerun()
 
 # ===================== LLM HELPER =====================
 def call_llm(prompt: str, images: list[str] = None, temperature: float = 0.7) -> str:
@@ -397,7 +402,13 @@ BELANGRIJK: Retourneer ALLEEN valide JSON, geen extra tekst.
                         result = result.split("```json")[1].split("```")[0].strip()
                     elif "```" in result:
                         result = result.split("```")[1].split("```")[0].strip()
-                    vision_result = json.loads(result)
+                    try:
+                        vision_result = json.loads(result)
+                    except json.JSONDecodeError:
+                        # LLM sometimes returns truncated JSON; salvage any complete question objects
+                        import re
+                        partial = re.findall(r'\{"num":\s*\d+,\s*"full_text":\s*"[^"]*"\}', result)
+                        vision_result = {"questions": [json.loads(m) for m in partial]}
 
                     for q in vision_result.get("questions", []):
                         if q.get("num") and q.get("full_text"):
@@ -891,17 +902,19 @@ elif st.session_state.page == "timeline":
 
         # Doe-opdrachten
         st.subheader("🛠 Doe-Opdrachten")
-        any_tasks = False
+        tasks_by_chapter: dict = {}
         for fname, data in st.session_state.pdf_data.items():
             if data.get("structured"):
-                tasks = data["structured"].get("doe_opdrachten", [])
-                if tasks:
-                    any_tasks = True
-                    st.write(f"**{fname}**")
-                    for d in tasks:
-                        st.markdown(f"• **{d['vraag']}** — {d['beschrijving']}")
+                for d in data["structured"].get("doe_opdrachten", []):
+                    ch = d.get("hoofdstuk", d.get("chapter", "?"))
+                    tasks_by_chapter.setdefault(ch, []).append(d)
 
-        if not any_tasks:
+        if tasks_by_chapter:
+            for ch in sorted(tasks_by_chapter.keys(), key=lambda x: (isinstance(x, str), x)):
+                st.markdown(f"### Hoofdstuk {ch}")
+                for d in tasks_by_chapter[ch]:
+                    st.markdown(f"• **{d['vraag']}** — {d['beschrijving']}")
+        else:
             st.info("Geen doe-opdrachten gevonden")
 
         st.divider()
@@ -941,6 +954,16 @@ elif st.session_state.page == "navigator":
 
                 # Display question text (no header for navigator page)
                 st.markdown(selected_q["full_text"])
+
+                is_completed = get_completed(st.session_state.current_pdf, selected_q["chapter"], key)
+                if st.checkbox("✅ Afgerond", value=is_completed, key=f"completed_{key}"):
+                    if not is_completed:
+                        save_completed(st.session_state.current_pdf, selected_q["chapter"], key, True)
+                        st.rerun()
+                else:
+                    if is_completed:
+                        save_completed(st.session_state.current_pdf, selected_q["chapter"], key, False)
+                        st.rerun()
 
                 st.divider()
 
