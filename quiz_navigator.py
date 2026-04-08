@@ -5,7 +5,6 @@ from PIL import Image
 import io
 import json
 import os
-from datetime import datetime
 import base64
 import requests  # voor xAI fallback indien nodig
 from pathlib import Path
@@ -794,37 +793,45 @@ elif st.session_state.page == "timeline":
 
         if all_events:
             st.subheader("⏰ Tijdlijn Events")
-            now = datetime.now()
+            rows_html = ""
             for ev in sorted(all_events, key=lambda x: x.get('time', '')):
-                # Determine time color based on minutes until event
                 time_str = ev.get('time', '')
                 start_time_str = time_str.split('-')[0].strip()
-                time_color = None
-                try:
-                    event_time = datetime.strptime(start_time_str, "%H:%M").replace(
-                        year=now.year, month=now.month, day=now.day
-                    )
-                    mins_until = (event_time - now).total_seconds() / 60
-                    if mins_until < 0:
-                        time_color = "strikethrough"
-                    elif mins_until < 30:
-                        time_color = "red"
-                    elif mins_until < 60:
-                        time_color = "orange"
-                except ValueError:
-                    pass
-
-                col_time, col_info = st.columns([1, 3])
-                with col_time:
-                    if time_color == "strikethrough":
-                        st.markdown(f"<span style='text-decoration:line-through;color:gray'>🕐 {time_str}</span>", unsafe_allow_html=True)
-                    elif time_color:
-                        st.markdown(f"<span style='color:{time_color}'>**🕐 {time_str}**</span>", unsafe_allow_html=True)
-                    else:
-                        st.markdown(f"**🕐 {time_str}**")
-                with col_info:
-                    st.markdown(ev['description'])
-                    st.caption(f"Vraag: {ev.get('question_ref', 'onbekend')} | {ev['pdf']}")
+                desc = ev['description'].replace("'", "&#39;")
+                caption = f"Vraag: {ev.get('question_ref', 'onbekend')} | {ev['pdf']}".replace("'", "&#39;")
+                rows_html += f"""
+                <tr data-start="{start_time_str}">
+                  <td class="time-col">🕐 {time_str}</td>
+                  <td class="info-col"><span class="desc">{desc}</span><br><span class="caption">{caption}</span></td>
+                </tr>"""
+            components.html(f"""
+                <style>
+                  table {{ border-collapse: collapse; width: 100%; font-family: sans-serif; font-size: 14px; }}
+                  .time-col {{ width: 25%; font-weight: bold; vertical-align: top; padding: 4px 8px 4px 0; }}
+                  .info-col {{ padding: 4px 0; }}
+                  .caption {{ color: gray; font-size: 12px; }}
+                </style>
+                <table>{rows_html}</table>
+                <script>
+                  const now = new Date();
+                  const nowMins = now.getHours() * 60 + now.getMinutes();
+                  document.querySelectorAll('tr[data-start]').forEach(row => {{
+                    const parts = row.dataset.start.split(':');
+                    if (parts.length !== 2) return;
+                    const evMins = parseInt(parts[0]) * 60 + parseInt(parts[1]);
+                    const diff = evMins - nowMins;
+                    const td = row.querySelector('.time-col');
+                    if (diff < 0) {{
+                      td.style.textDecoration = 'line-through';
+                      td.style.color = 'gray';
+                    }} else if (diff < 30) {{
+                      td.style.color = 'red';
+                    }} else if (diff < 60) {{
+                      td.style.color = 'orange';
+                    }}
+                  }});
+                </script>
+            """, height=max(60, len(all_events) * 52))
         else:
             st.info("Geen timeline events gevonden")
 
