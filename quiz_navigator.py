@@ -261,7 +261,7 @@ def _render_pdf_pages(filename: str, page_start: int, page_end: int) -> list[str
         with pdfplumber.open(pdf_path) as pdf:
             for page_num in range(page_start, min(page_end + 1, len(pdf.pages) + 1)):
                 page = pdf.pages[page_num - 1]
-                page_image = page.to_image(resolution=150)
+                page_image = page.to_image(resolution=100)
                 img = page_image.original.convert("RGB")
                 buf = _io.BytesIO()
                 img.save(buf, format="JPEG", quality=85)
@@ -716,16 +716,46 @@ if st.session_state.page == "home":
                             del st.session_state[f"confirm_delete_{fname}"]
                             st.rerun()
 
-            # Show preprocessing info upfront if available
-            if "preprocessing_info" in data and data["preprocessing_info"]:
-                st.write("**📊 Preprocessing detecties:**")
-                col_a, col_b, col_c = st.columns(3)
-                with col_a:
-                    st.metric("Vragen gedetecteerd", data["preprocessing_info"].get("questions_detected", "—"))
-                with col_b:
-                    st.metric("Timeline secties", data["preprocessing_info"].get("timeline_sections", "—"))
-                with col_c:
-                    st.metric("Task secties", data["preprocessing_info"].get("task_sections", "—"))
+            # Show LLM analysis results per chapter
+            if data.get("structured"):
+                structured = data["structured"]
+                questions = structured.get("questions", [])
+                timeline = structured.get("timeline", [])
+                doe_opdrachten = structured.get("doe_opdrachten", [])
+
+                # Group questions by chapter
+                chapters: dict = {}
+                for q in questions:
+                    ch = q.get("chapter", 1)
+                    chapters.setdefault(ch, 0)
+                    chapters[ch] += 1
+
+                # Group timeline and doe_opdrachten by chapter
+                timeline_by_chapter: dict = {}
+                for ev in timeline:
+                    ch = ev.get("hoofdstuk", ev.get("chapter", None))
+                    if ch:
+                        timeline_by_chapter[ch] = timeline_by_chapter.get(ch, 0) + 1
+
+                doe_by_chapter: dict = {}
+                for d in doe_opdrachten:
+                    ch = d.get("hoofdstuk", d.get("chapter", None))
+                    if ch:
+                        doe_by_chapter[ch] = doe_by_chapter.get(ch, 0) + 1
+
+                all_chapters = sorted(set(list(chapters.keys()) + list(timeline_by_chapter.keys()) + list(doe_by_chapter.keys())))
+
+                if all_chapters:
+                    st.write("**Analyse resultaten:**")
+                    for ch in all_chapters:
+                        parts = []
+                        if chapters.get(ch):
+                            parts.append(f"{chapters[ch]} vragen")
+                        if doe_by_chapter.get(ch):
+                            parts.append(f"{doe_by_chapter[ch]} doe opdrachten")
+                        if timeline_by_chapter.get(ch):
+                            parts.append(f"{timeline_by_chapter[ch]} timeline events")
+                        st.caption(f"Hoofdstuk {ch}: {', '.join(parts)}")
 
             # Debug: Show extraction details
             with st.expander(f"🔍 Debug: {fname}"):
@@ -764,8 +794,37 @@ elif st.session_state.page == "timeline":
 
         if all_events:
             st.subheader("⏰ Tijdlijn Events")
+            now = datetime.now()
             for ev in sorted(all_events, key=lambda x: x.get('time', '')):
-                st.markdown(f"**🕐 {ev['time']}** — {ev['description']}  \n<small>Vraag: {ev.get('question_ref', 'onbekend')} | {ev['pdf']}</small>")
+                # Determine time color based on minutes until event
+                time_str = ev.get('time', '')
+                start_time_str = time_str.split('-')[0].strip()
+                time_color = None
+                try:
+                    event_time = datetime.strptime(start_time_str, "%H:%M").replace(
+                        year=now.year, month=now.month, day=now.day
+                    )
+                    mins_until = (event_time - now).total_seconds() / 60
+                    if mins_until < 0:
+                        time_color = "strikethrough"
+                    elif mins_until < 30:
+                        time_color = "red"
+                    elif mins_until < 60:
+                        time_color = "orange"
+                except ValueError:
+                    pass
+
+                col_time, col_info = st.columns([1, 3])
+                with col_time:
+                    if time_color == "strikethrough":
+                        st.markdown(f"<span style='text-decoration:line-through;color:gray'>🕐 {time_str}</span>", unsafe_allow_html=True)
+                    elif time_color:
+                        st.markdown(f"<span style='color:{time_color}'>**🕐 {time_str}**</span>", unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"**🕐 {time_str}**")
+                with col_info:
+                    st.markdown(ev['description'])
+                    st.caption(f"Vraag: {ev.get('question_ref', 'onbekend')} | {ev['pdf']}")
         else:
             st.info("Geen timeline events gevonden")
 
@@ -827,13 +886,16 @@ elif st.session_state.page == "navigator":
                 st.divider()
 
                 page_start = selected_q.get("page_start", selected_q.get("page", 1))
-                # Derive page_end: use next question's page_start - 1 (questions are in order)
-                q_index = questions.index(selected_q)
-                if q_index + 1 < len(questions):
-                    next_q_page = questions[q_index + 1].get("page_start", page_start + 1)
-                    page_end = max(page_start, next_q_page - 1)
-                else:
-                    page_end = selected_q.get("page_end", page_start)
+                # Use page_end from structured data (set by LLM during analysis) as the most reliable source.
+                # Fall back to next question's page_start - 1 only if page_end is missing.
+                page_end = selected_q.get("page_end")
+                if not page_end:
+                    q_index = questions.index(selected_q)
+                    if q_index + 1 < len(questions):
+                        next_q_page = questions[q_index + 1].get("page_start", page_start + 1)
+                        page_end = max(page_start, next_q_page - 1)
+                    else:
+                        page_end = page_start
 
                 page_images = _render_pdf_pages(
                     st.session_state.current_pdf, page_start, page_end
@@ -952,6 +1014,9 @@ function openLightbox(src) {{
                     st.toast("✅ Notitie opgeslagen!")
 
                 if st.session_state[generating_key]:
+                    imgs_to_send = page_images[:4]
+                    total_kb = sum(len(b) * 3 // 4 // 1024 for b in imgs_to_send)
+                    st.caption(f"Pagina's naar LLM: {page_start}–{page_end} → {len(imgs_to_send)} afbeeldingen, ~{total_kb} KB totaal")
                     with st.spinner("🤖 AI suggestie genereren..."):
                         extra_input_val = st.session_state.get(extra_input_key, "")
                         prompt = f"""Geef een volledig, correct en creatief antwoord/suggestie voor deze quizvraag (in natuurlijk Nederlands):
@@ -961,7 +1026,7 @@ Vraag:
 
 Extra context van gebruiker:
 {extra_input_val or 'geen'}"""
-                        suggestion_images = page_images if page_images else None
+                        suggestion_images = imgs_to_send if imgs_to_send else None
                         suggestion = call_llm(prompt, images=suggestion_images)
                         save_ai_suggestion(st.session_state.current_pdf, selected_q["chapter"], key, suggestion)
                         st.session_state[generating_key] = False
