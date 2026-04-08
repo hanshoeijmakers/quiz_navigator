@@ -588,11 +588,22 @@ if st.session_state.page == "home":
                     st.button("✅ Klaar", disabled=True, key=f"done_{fname}")
             with col3:
                 if st.button("🗑", key=f"delete_{fname}"):
-                    del st.session_state.pdf_data[fname]
-                    delete_pdf_data(fname)  # Also delete persisted data
-                    if st.session_state.current_pdf == fname:
-                        st.session_state.current_pdf = None
-                    st.rerun()
+                    st.session_state[f"confirm_delete_{fname}"] = True
+                if st.session_state.get(f"confirm_delete_{fname}"):
+                    st.warning("Weet je zeker dat je dit hoofdstuk met alle vragen en antwoorden wil verwijderen?")
+                    confirm_col1, confirm_col2 = st.columns(2)
+                    with confirm_col1:
+                        if st.button("Ja, verwijder", key=f"confirm_yes_{fname}", type="primary"):
+                            del st.session_state.pdf_data[fname]
+                            delete_pdf_data(fname)  # Also delete persisted data
+                            if st.session_state.current_pdf == fname:
+                                st.session_state.current_pdf = None
+                            del st.session_state[f"confirm_delete_{fname}"]
+                            st.rerun()
+                    with confirm_col2:
+                        if st.button("Annuleer", key=f"confirm_no_{fname}"):
+                            del st.session_state[f"confirm_delete_{fname}"]
+                            st.rerun()
 
             # Show preprocessing info upfront if available
             if "preprocessing_info" in data and data["preprocessing_info"]:
