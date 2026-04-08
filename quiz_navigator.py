@@ -786,6 +786,7 @@ elif st.session_state.page == "timeline":
     else:
         # Collect all events
         all_events = []
+        
         for fname, data in st.session_state.pdf_data.items():
             if data.get("structured"):
                 for ev in data["structured"].get("timeline", []):
