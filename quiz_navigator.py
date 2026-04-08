@@ -47,7 +47,7 @@ if "pdf_data" not in st.session_state:
                 preprocessing_info = analysis.get("preprocessing_info", {})
                 st.session_state.pdf_data[pdf_name] = {
                     "raw_text": analysis.get("raw_text", ""),
-                    "images": analysis.get("images", []),
+                    "images": [],  # Don't load images into session state — too large; reload from disk on demand
                     "structured": analysis.get("structured"),
                     "preprocessing_info": preprocessing_info,
                     "debug_log": preprocessing_info.get("debug_log"),
@@ -270,11 +270,13 @@ def _render_pdf_pages(filename: str, page_start: int, page_end: int) -> list[str
         return []
 
 
+@st.cache_data(show_spinner=False)
 def _get_page_screenshots(filename: str) -> list[dict]:
     """
     Get full-page screenshots of a PDF for vision analysis.
     Uses the saved original PDF file (stored during upload).
     Returns list of {page: N, base64: "..."} dicts.
+    Cached to avoid re-rendering on every Streamlit rerun.
     """
     import io as _io
     pdf_path = Path("data") / filename / "original.pdf"
@@ -286,9 +288,9 @@ def _get_page_screenshots(filename: str) -> list[dict]:
             screenshots = []
             for page_num, page in enumerate(pdf.pages, 1):
                 try:
-                    page_image = page.to_image(resolution=150)
+                    page_image = page.to_image(resolution=120)
                     buf = _io.BytesIO()
-                    page_image.original.save(buf, format="PNG")
+                    page_image.original.save(buf, format="JPEG", quality=75)
                     screenshots.append({
                         "page": page_num,
                         "base64": base64.b64encode(buf.getvalue()).decode(),
