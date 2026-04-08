@@ -13,7 +13,8 @@ from pdf_preprocessing import PDFPreprocessor
 import pdf_ocr
 from persistence import (
     load_all_chapters, save_answer, save_ai_suggestion,
-    get_answer, get_ai_suggestion, delete_pdf_data, export_all_data,
+    get_answer, get_ai_suggestion, save_note, get_note,
+    delete_pdf_data, export_all_data,
     load_chapter_data, save_pdf_analysis, load_pdf_analysis, has_pdf_analysis
 )
 
@@ -235,12 +236,45 @@ def call_llm(prompt: str, images: list[str] = None, temperature: float = 0.7) ->
     return ""
 
 # ===================== VISION-BASED EXTRACTION =====================
-def extract_questions_with_vision(filename: str, data: dict, preprocessed: dict) -> dict:
+def _get_page_screenshots(filename: str) -> list[dict]:
     """
-    Use Grok's vision to extract questions from PDF page images.
+    Get full-page screenshots of a PDF for vision analysis.
+    Uses the saved original PDF file (stored during upload).
+    Returns list of {page: N, base64: "..."} dicts.
+    """
+    from pathlib import Path
+    import io as _io
+    pdf_path = Path("data") / filename / "original.pdf"
+    if not pdf_path.exists():
+        return []
 
-    This supplements OCR by reading the actual page images, improving accuracy
-    for questions that OCR missed (e.g., questions 2, 4, 8, 9).
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            screenshots = []
+            for page_num, page in enumerate(pdf.pages, 1):
+                try:
+                    page_image = page.to_image(resolution=150)
+                    buf = _io.BytesIO()
+                    page_image.original.save(buf, format="PNG")
+                    screenshots.append({
+                        "page": page_num,
+                        "base64": base64.b64encode(buf.getvalue()).decode(),
+                    })
+                except Exception:
+                    pass
+            return screenshots
+    except Exception as e:
+        st.warning(f"⚠️ Could not load PDF for vision analysis: {str(e)[:100]}")
+        return []
+
+
+def extract_questions_with_vision(filename: str, preprocessed: dict) -> dict:
+    """
+    Use Grok's vision to extract questions from PDF page screenshots.
+
+    Converts each PDF page to an image and sends it to the LLM, which is much
+    more reliable than sending embedded images (photos/illustrations) which
+    don't contain question text.
 
     Args:
         filename: PDF filename
@@ -250,7 +284,9 @@ def extract_questions_with_vision(filename: str, data: dict, preprocessed: dict)
     Returns:
         Dict with vision_questions and merged_questions
     """
-    if not data.get("images") or len(data["images"]) == 0:
+    page_screenshots = _get_page_screenshots(filename)
+    if not page_screenshots:
+        st.warning("⚠️ Vision analysis skipped: original PDF not found on disk. Re-upload the PDF to enable vision detection.")
         return {"vision_questions": [], "merged_questions": []}
 
     detected_q_summary = "\n".join([
@@ -260,32 +296,27 @@ def extract_questions_with_vision(filename: str, data: dict, preprocessed: dict)
 
     vision_questions = []
 
-    with st.spinner(f"📸 Grok analyseert afbeeldingen van {filename}..."):
-        # Process images to find missing questions
-        for img_idx, img in enumerate(data["images"]):
-            page_num = img.get("page", img_idx + 1)
-
-            # Only send images if we expect missing questions on this page
-            # (reduce API usage by being selective)
-            img_base64 = img.get("base64")
-            if not img_base64:
-                continue
+    with st.spinner(f"📸 Grok analyseert pagina's van {filename}..."):
+        for screenshot in page_screenshots:
+            page_num = screenshot["page"]
+            img_base64 = screenshot["base64"]
 
             prompt = f"""Je bent een perfecte quiz-assistent. Analyseer deze PDF pagina-afbeelding en extracteer ALLE vragen.
 
-CONTEXT - Vragen die al bekend zijn:
+CONTEXT - Vragen die al via OCR gevonden zijn (mogelijk incompleet):
 {detected_q_summary}
 
 TAAK:
 1. Kijk naar de afbeelding
 2. Identificeer ALLE vragen op deze pagina (volledig getal "Vraag 1", "Vraag 2", etc.)
-3. Voor ELKE vraag: geef nummer, volledige tekst
-4. Geef resultaat als JSON:
+3. Voor ELKE vraag die je ziet: geef nummer en volledige tekst
+4. Als er geen vragen op deze pagina staan, geef een lege lijst
+5. Geef resultaat als JSON:
 
 {{
   "questions": [
-    {{"num": 1, "full_text": "volledige vraagtekst", "found": true}},
-    {{"num": 2, "full_text": "...", "found": true}}
+    {{"num": 1, "full_text": "volledige vraagtekst"}},
+    {{"num": 2, "full_text": "..."}}
   ]
 }}
 
@@ -293,20 +324,23 @@ BELANGRIJK: Retourneer ALLEEN valide JSON, geen extra tekst.
 """
 
             try:
-                result = call_llm(prompt, images=[img_base64], temperature=0.3)
+                result = call_llm(prompt, images=[img_base64], temperature=0.1)
 
                 # Parse JSON
                 if "```json" in result:
                     result = result.split("```json")[1].split("```")[0].strip()
+                elif "```" in result:
+                    result = result.split("```")[1].split("```")[0].strip()
                 vision_result = json.loads(result)
 
                 for q in vision_result.get("questions", []):
-                    if q.get("found"):
+                    if q.get("num") and q.get("full_text"):
                         vision_questions.append({
                             "num": q["num"],
                             "page": page_num,
                             "full_text": q.get("full_text", "")[:1000],
                         })
+                        st.caption(f"  Pagina {page_num}: gevonden Vraag {q['num']}")
             except Exception as e:
                 st.warning(f"⚠️ Vision analysis failed for page {page_num}: {str(e)[:100]}")
 
@@ -376,7 +410,7 @@ def analyze_pdf(filename: str):
         st.text(preprocessed["extraction_summary"][:1000])
 
     # Step 2: Use vision to enhance question extraction (fill gaps from OCR)
-    vision_result = extract_questions_with_vision(filename, data, preprocessed)
+    vision_result = extract_questions_with_vision(filename, preprocessed)
     if vision_result["vision_questions"]:
         st.info(f"📸 Vision enhancement: Found {len(vision_result['vision_questions'])} questions from images")
 
@@ -493,7 +527,14 @@ if st.session_state.page == "home":
             with progress_container:
                 with st.spinner(f"Verwerken {file.name}..."):
                     try:
-                        with pdfplumber.open(file) as pdf:
+                        pdf_bytes = file.read()
+                        # Save original PDF to disk for later vision analysis
+                        pdf_dir = Path("data") / file.name
+                        pdf_dir.mkdir(parents=True, exist_ok=True)
+                        (pdf_dir / "original.pdf").write_bytes(pdf_bytes)
+
+                        import io as _io
+                        with pdfplumber.open(_io.BytesIO(pdf_bytes)) as pdf:
                             raw_text = ""
                             images = []
                             total_pages = len(pdf.pages)
@@ -811,6 +852,16 @@ function openLightbox(src) {{
                     if st.button("💾 Opslaan"):
                         save_answer(st.session_state.current_pdf, selected_q["chapter"], key, new_answer)
                         st.toast("✅ Antwoord opgeslagen!")
+
+                st.divider()
+
+                # Notes section
+                st.subheader("📝 Notities")
+                current_note = get_note(st.session_state.current_pdf, selected_q["chapter"], key)
+                new_note = st.text_area("Notities", value=current_note, height=120, key=f"note_{key}", label_visibility="collapsed")
+                if st.button("💾 Notitie opslaan", key=f"save_note_{key}"):
+                    save_note(st.session_state.current_pdf, selected_q["chapter"], key, new_note)
+                    st.toast("✅ Notitie opgeslagen!")
 
                 if st.session_state[generating_key]:
                     with st.spinner("🤖 AI suggestie genereren..."):

@@ -87,6 +87,23 @@ def get_ai_suggestion(pdf_name: str, chapter: int, question_key: str) -> str:
     data = load_chapter_data(pdf_name, chapter)
     return data.get("questions", {}).get(question_key, {}).get("ai_suggestion", "")
 
+def save_note(pdf_name: str, chapter: int, question_key: str, note: str):
+    """Save a note for a question and write to disk."""
+    file_path = get_chapter_file(pdf_name, chapter)
+    data = load_chapter_data(pdf_name, chapter)
+
+    if question_key not in data["questions"]:
+        data["questions"][question_key] = {}
+
+    data["questions"][question_key]["note"] = note
+
+    _write_chapter_file(file_path, data)
+
+def get_note(pdf_name: str, chapter: int, question_key: str) -> str:
+    """Get a note for a question."""
+    data = load_chapter_data(pdf_name, chapter)
+    return data.get("questions", {}).get(question_key, {}).get("note", "")
+
 def delete_pdf_data(pdf_name: str):
     """Delete all data for a PDF."""
     import shutil
