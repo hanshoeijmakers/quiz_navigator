@@ -45,11 +45,13 @@ if "pdf_data" not in st.session_state:
             pdf_name = metadata_file.name.replace("_metadata.json", "")
             analysis = load_pdf_analysis(pdf_name)
             if analysis:
+                preprocessing_info = analysis.get("preprocessing_info", {})
                 st.session_state.pdf_data[pdf_name] = {
                     "raw_text": analysis.get("raw_text", ""),
-                    "images": analysis.get("images", []),  # Load images from metadata
+                    "images": analysis.get("images", []),
                     "structured": analysis.get("structured"),
-                    "preprocessing_info": analysis.get("preprocessing_info", {})
+                    "preprocessing_info": preprocessing_info,
+                    "debug_log": preprocessing_info.get("debug_log"),
                 }
 
 if "current_pdf" not in st.session_state:
@@ -410,8 +412,6 @@ def analyze_pdf(filename: str):
 
     # Step 2: Use vision to enhance question extraction (fill gaps from OCR)
     vision_result = extract_questions_with_vision(filename, preprocessed)
-    if vision_result["vision_questions"]:
-        st.info(f"📸 Vision enhancement: Found {len(vision_result['vision_questions'])} questions from images")
 
     # Use merged questions for LLM structuring
     merged_questions_for_llm = vision_result["merged_questions"] if vision_result["merged_questions"] else preprocessed["questions_detected"]
@@ -420,10 +420,16 @@ def analyze_pdf(filename: str):
         for q in merged_questions_for_llm
     ])
 
-    with st.expander(f"📋 BEVESTIGDE VRAGEN ({len(merged_questions_for_llm)} totaal — dit gaat naar de finale LLM)", expanded=True):
-        for q in merged_questions_for_llm:
-            source = "👁 vision" if q.get("vision_found") else ("👁+OCR" if q.get("vision_enhanced") else "OCR")
-            st.write(f"- **Vraag {q['num']}** [{source}]: {q.get('text', '')[:120]}")
+    # Build debug log entry for vision step
+    debug_log = {
+        "ocr_detected": [{"num": q["num"], "text": q["text"][:200]} for q in preprocessed.get("questions_detected", [])],
+        "vision_per_page": [{"page": vq["page"], "num": vq["num"], "text": vq["full_text"][:200]} for vq in vision_result["vision_questions"]],
+        "bevestigde_vragen": [
+            {"num": q["num"], "source": "vision" if q.get("vision_found") else ("vision+ocr" if q.get("vision_enhanced") else "ocr"), "text": q.get("text", "")[:200]}
+            for q in merged_questions_for_llm
+        ],
+        "safety_net_recovered": [],
+    }
 
     # Step 3: Send preprocessed text to LLM for final structuring
     prompt = f"""Je bent een perfecte quiz-assistent. Analyseer de volgende Nederlandse quiz-PDF tekst en geef ALLEEN een valide JSON terug (geen extra tekst).
@@ -486,9 +492,9 @@ BELANGRIJK voor vragen:
             # Safety net: if the LLM still dropped a vision-confirmed question, inject it
             # using the text Grok read from the page image (not OCR preprocessing)
             llm_q_nums = {q["num"] for q in structured.get("questions", [])}
+            debug_log["llm_returned"] = sorted(llm_q_nums)
             for vq in merged_questions_for_llm:
                 if vq["num"] not in llm_q_nums:
-                    # Use vision text if available (vision_found=True means text came from Grok image reading)
                     vision_text = vq.get("text", "")
                     structured.setdefault("questions", []).append({
                         "chapter": vq.get("chapter", 1),
@@ -500,19 +506,18 @@ BELANGRIJK voor vragen:
                         "page_end": vq.get("page", 0),
                         "vision_recovered": True,
                     })
-                    st.warning(f"⚠️ Vraag {vq['num']} was dropped by LLM, recovered from Grok vision output")
+                    debug_log["safety_net_recovered"].append(vq["num"])
             structured["questions"].sort(key=lambda q: (q.get("chapter", 1), q["num"]))
 
             data["structured"] = structured
+            data["debug_log"] = debug_log
             timeline_count = len(structured.get('timeline', []))
             q_count = len(structured.get('questions', []))
             st.success(f"✅ {filename} geanalyseerd! ⏰ Tijdlijn: {timeline_count} | Vragen: {q_count}")
 
-            # Show preprocessing info as debug hint
-            with st.expander("📊 Preprocessing debug info"):
-                st.json(data["preprocessing_info"])
-            # Save analysis results to disk
-            save_pdf_analysis(filename, data["raw_text"], data["images"], structured, data.get("preprocessing_info", {}))
+            # Save analysis results to disk (debug_log stored inside preprocessing_info)
+            full_preprocessing_info = {**data.get("preprocessing_info", {}), "debug_log": debug_log}
+            save_pdf_analysis(filename, data["raw_text"], data["images"], structured, full_preprocessing_info)
 
         except Exception as e:
             st.error(f"JSON parse fout: {e}")
@@ -653,7 +658,12 @@ if st.session_state.page == "home":
                         analyze_pdf(fname)
                         st.rerun()
                 else:
-                    st.button("✅ Klaar", disabled=True, key=f"done_{fname}")
+                    if st.button("🔄 Heranalyseer", key=f"reanalyze_{fname}"):
+                        data["structured"] = None
+                        data["debug_log"] = None
+                        st.session_state.current_pdf = fname
+                        analyze_pdf(fname)
+                        st.rerun()
             with col3:
                 if st.button("🗑", key=f"delete_{fname}"):
                     st.session_state[f"confirm_delete_{fname}"] = True
@@ -689,7 +699,19 @@ if st.session_state.page == "home":
                 st.write(f"**Karakters geëxtraheerd:** {len(data['raw_text'])}")
                 st.write(f"**Afbeeldingen gevonden:** {len(data['images'])}")
 
-                # Show raw extracted text
+                if data.get("debug_log"):
+                    dl = data["debug_log"]
+                    st.write("**OCR gedetecteerd:**", [q["num"] for q in dl.get("ocr_detected", [])])
+                    st.write("**Vision per pagina:**")
+                    for vp in dl.get("vision_per_page", []):
+                        st.caption(f"  Pagina {vp['page']}: Vraag {vp['num']} — {vp['text'][:80]}")
+                    st.write("**BEVESTIGDE VRAGEN (naar LLM):**")
+                    for bv in dl.get("bevestigde_vragen", []):
+                        st.caption(f"  Vraag {bv['num']} [{bv['source']}]: {bv['text'][:100]}")
+                    st.write("**LLM returneerde vragen:**", dl.get("llm_returned", []))
+                    if dl.get("safety_net_recovered"):
+                        st.warning(f"Safety net hersteld: {dl['safety_net_recovered']}")
+
                 with st.expander("Raw text (first 2000 chars)", expanded=False):
                     st.text_area("Extracted text preview", value=data["raw_text"][:2000], height=300, disabled=True, key=f"raw_{fname}")
 
